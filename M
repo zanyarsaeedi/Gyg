@@ -1,0 +1,687 @@
+import sqlite3
+import telebot
+from telebot import types
+from threading import Timer
+import random
+
+# اطلاعات ربات و کانال‌ها
+BOT_TOKEN = "1895336595:AAE-luW2HSfF1gBrtjz4KxswgWOqBbnv8a4"
+ADMIN_ID = [692779565]
+PUBLIC_CHANNEL_ID =-1002329277132
+PRIVATE_CHANNEL_ID =-1002431167411
+
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# اتصال به دیتابیس SQLite
+conn = sqlite3.connect('airdrop.db', check_same_thread=False)
+cursor = conn.cursor()
+
+# ایجاد جدول‌ها
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS movies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    movie_id INTEGER UNIQUE,
+    title TEXT,
+    description TEXT,
+    photo_id TEXT,
+    trailer_file_id TEXT  -- اضافه شدن ستون تریلر
+)
+''')
+
+
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS movie_qualities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    movie_id INTEGER,
+    quality TEXT,
+    category TEXT,
+    file_id TEXT,
+    FOREIGN KEY(movie_id) REFERENCES movies(movie_id)
+)
+''')
+
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS mandatory_channels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE
+)
+''')
+
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS ads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT,
+    file_id TEXT
+)
+''')
+
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER UNIQUE,
+    username TEXT,
+    first_name TEXT,
+    last_name TEXT,
+    join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+''')
+
+conn.commit()
+
+
+
+# پیام خوش‌آمدگویی
+@bot.message_handler(commands=['start'])
+def start(message):
+    try:
+        # ذخیره اطلاعات کاربر در جدول users
+        user_id = message.from_user.id
+        username = message.from_user.username or "بدون نام کاربری"
+        first_name = message.from_user.first_name or ""
+        last_name = message.from_user.last_name or ""
+
+        cursor.execute(
+            "INSERT OR IGNORE INTO users (user_id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
+            (user_id, username, first_name, last_name)
+        )
+        conn.commit()  # ذخیره تغییرات در پایگاه داده
+
+        # بررسی اگر پیام شامل شناسه فیلم باشد
+        args = message.text.split()
+        if len(args) > 1:  # بررسی لینک حاوی شناسه فیلم
+            movie_id = args[1]
+            send_movie_to_user(message, movie_id)
+        else:
+            if message.from_user.id in ADMIN_ID:
+                admin_panel(message)
+            else:
+                bot.send_message(
+                    message.chat.id,
+                    "🎬 به ربات خوش آمدید!\nبرای دریافت فیلم‌ها لطفاً از لینک‌های موجود در کانال عمومی استفاده کنید         @movejavan.",
+                    reply_markup=types.ReplyKeyboardRemove()
+                )
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ خطا در اجرای دستور /start: {e}")
+        
+def add_column_if_not_exists():
+    # بررسی وجود ستون در جدول
+    cursor.execute("PRAGMA table_info(movies)")
+    columns = [column[1] for column in cursor.fetchall()]  # استخراج نام ستون‌ها
+
+    if "trailer_file_id" not in columns:
+        cursor.execute("ALTER TABLE movies ADD COLUMN trailer_file_id TEXT")
+        conn.commit()
+        print("ستون trailer_file_id به جدول movies اضافه شد.")
+    else:
+        print("ستون trailer_file_id قبلاً وجود دارد.")
+
+# فراخوانی تابع
+add_column_if_not_exists()
+        
+# پنل مدیریت
+
+def admin_panel(message):
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    markup.add(
+        types.KeyboardButton("➕ ثبت فیلم جدید"),
+        types.KeyboardButton("📋 مدیریت تبلیغات"),
+        types.KeyboardButton("📋 مدیریت کانال‌های اجباری"),
+        types.KeyboardButton("🔹 ثبت فیلم جداگانه"),
+        types.KeyboardButton("📊 آمار کاربران"),  # دکمه جدید
+        types.KeyboardButton("🔙 بازگشت")
+    )
+    bot.send_message(message.chat.id, "📋 پنل مدیریت", reply_markup=markup)
+    
+    
+@bot.message_handler(func=lambda message: message.text == "📊 آمار کاربران" and message.from_user.id in ADMIN_ID)
+def show_user_stats(message):
+    try:
+        total_users = cursor.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        bot.send_message(message.chat.id, f"📊 تعداد کل کاربران: {total_users}")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ خطا در دریافت آمار: {e}")
+
+@bot.message_handler(func=lambda message: message.text == "🔹 ثبت فیلم جداگانه" and message.from_user.id in ADMIN_ID)
+def register_separate_movie(message):
+    movie_id = random.randint(1000, 9999)  # ایجاد شناسه تصادفی فیلم
+    bot.send_message(message.chat.id, f"🎥 کد فیلم: {movie_id}")
+    show_quality_panel_separate(message, movie_id)
+
+def show_quality_panel_separate(message, movie_id):
+    qualities = ["1080", "720", "480", "360"]
+    markup = types.InlineKeyboardMarkup()
+
+    # بررسی کیفیت‌های ارسال‌شده
+    uploaded_qualities = cursor.execute("SELECT quality FROM movie_qualities WHERE movie_id = ?", (movie_id,)).fetchall()
+    uploaded_qualities = [q[0] for q in uploaded_qualities]  # استخراج کیفیت‌ها از دیتابیس
+
+    for quality in qualities:
+        if quality in uploaded_qualities:
+            markup.add(types.InlineKeyboardButton(f"✅ کیفیت {quality} (ارسال‌شده)", callback_data=f"already_uploaded"))
+        else:
+            markup.add(types.InlineKeyboardButton(f"آپلود کیفیت {quality}", callback_data=f"upload_quality_separate|{movie_id}|{quality}"))
+    
+    markup.add(types.InlineKeyboardButton("✅ تمام", callback_data=f"finalize_separate|{movie_id}"))
+    bot.send_message(message.chat.id, "🎥 کیفیت مورد نظر خود را انتخاب کنید و فایل مربوطه را ارسال کنید.", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("upload_quality_separate|"))
+def upload_quality_separate(call):
+    _, movie_id, quality = call.data.split("|")
+    bot.send_message(call.message.chat.id, f"لطفاً فایل کیفیت {quality} را ارسال کنید:")
+    bot.register_next_step_handler(call.message, process_quality_file_separate, movie_id, quality)
+
+def process_quality_file_separate(message, movie_id, quality):
+    if not message.video:
+        bot.send_message(message.chat.id, "❌ لطفاً یک فایل معتبر ارسال کنید.")
+        show_quality_panel_separate(message, movie_id)
+        return
+    file_id = message.video.file_id
+    bot.send_video(PRIVATE_CHANNEL_ID, file_id, caption=f"کیفیت {quality} - کد فیلم: {movie_id}")
+    cursor.execute("INSERT INTO movie_qualities (movie_id, quality, file_id) VALUES (?, ?, ?)", (movie_id, quality, file_id))
+    conn.commit()
+    bot.send_message(message.chat.id, f"✅ فایل کیفیت {quality} با موفقیت آپلود شد!")
+    show_quality_panel_separate(message, movie_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("finalize_separate|"))
+def finalize_separate(call):
+    movie_id = call.data.split("|")[1]
+    # بررسی کیفیت‌های ثبت‌شده
+    qualities = cursor.execute("SELECT quality FROM movie_qualities WHERE movie_id = ?", (movie_id,)).fetchall()
+
+    if not qualities:
+        bot.send_message(call.message.chat.id, "❌ هیچ کیفیتی برای این فیلم ثبت نشده است.")
+        return
+
+    quality_list = "\n".join([f"- کیفیت {q[0]}" for q in qualities])
+    link = f"https://t.me/{bot.get_me().username}?start={movie_id}"
+
+    # ارسال لینک نهایی
+    bot.send_message(
+        call.message.chat.id,
+        f"✅ ثبت فیلم به پایان رسید.\n\n🎥 **کد فیلم:** {movie_id}\n📺 **کیفیت‌ها:**\n{quality_list}\n\n🔗 **لینک فیلم:**\n{link}",
+        parse_mode="Markdown"
+    )
+
+    
+# ➕ ثبت فیلم جدید
+
+@bot.message_handler(func=lambda message: message.text == "➕ ثبت فیلم جدید" and message.from_user.id in ADMIN_ID)
+def add_new_movie(message):
+    movie_id = random.randint(1000, 9999)  # شناسه فیلم تصادفی
+    bot.send_message(message.chat.id, f"🎥 کد فیلم: {movie_id}")
+    show_quality_panel(message, movie_id)
+
+def show_quality_panel(message, movie_id):
+    """نمایش پنل کیفیت‌ها برای دوبله و زیرنویس فارسی با بررسی فایل‌های آپلود شده."""
+    categories = ["دوبله فارسی", "زیرنویس فارسی"]
+    qualities = ["1080", "720", "480", "360"]
+    markup = types.InlineKeyboardMarkup()
+
+    for category in categories:
+        for quality in qualities:
+            # بررسی وضعیت آپلود
+            uploaded = cursor.execute(
+                "SELECT 1 FROM movie_qualities WHERE movie_id = ? AND category = ? AND quality = ?",
+                (movie_id, category, quality)
+            ).fetchone()
+            if uploaded:
+                markup.add(
+                    types.InlineKeyboardButton(
+                        f"✅ {category} - کیفیت {quality} (آپلود شده)",
+                        callback_data="already_uploaded"
+                    )
+                )
+            else:
+                markup.add(
+                    types.InlineKeyboardButton(
+                        f"{category} - کیفیت {quality}",
+                        callback_data=f"upload_quality|{movie_id}|{category}|{quality}"
+                    )
+                )
+
+    markup.add(types.InlineKeyboardButton("✅ ادامه به مرحله بعد", callback_data=f"next_step|{movie_id}"))
+    bot.send_message(message.chat.id, "🎥 کیفیت و نوع فایل را انتخاب کنید:", reply_markup=markup)
+
+markup = types.InlineKeyboardMarkup()
+
+markup = types.InlineKeyboardMarkup()
+markup.add(types.InlineKeyboardButton(f"آپلود تریلر", callback_data=f"upload_trailer|{movie_id}"))
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("upload_quality|"))
+def upload_quality(call):
+    """آپلود فایل کیفیت‌ها."""
+    _, movie_id, category, quality = call.data.split("|")
+    bot.send_message(call.message.chat.id, f"لطفاً فایل '{category}' با کیفیت {quality} را ارسال کنید:")
+    bot.register_next_step_handler(call.message, process_quality_file, movie_id, category, quality)
+
+def process_quality_file(message, movie_id, category, quality):
+    """ذخیره فایل کیفیت و ارسال به کانال خصوصی."""
+    if not message.video:
+        bot.send_message(message.chat.id, "❌ لطفاً یک فایل معتبر ارسال کنید.")
+        return
+
+    file_id = message.video.file_id
+    caption = f"{category} - کیفیت {quality} - کد فیلم: {movie_id}"
+    bot.send_video(PRIVATE_CHANNEL_ID, file_id, caption=caption)
+
+    # ذخیره اطلاعات در پایگاه داده
+    cursor.execute(
+        "INSERT INTO movie_qualities (movie_id, quality, category, file_id) VALUES (?, ?, ?, ?)",
+        (movie_id, quality, category, file_id)
+    )
+    conn.commit()
+    bot.send_message(message.chat.id, f"✅ فایل '{category}' با کیفیت {quality} با موفقیت آپلود شد!")
+    show_quality_panel(message, movie_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("upload_trailer|"))
+def upload_trailer(call):
+    movie_id = call.data.split("|")[1]
+    bot.send_message(call.message.chat.id, "لطفاً فایل تریلر را ارسال کنید:")
+    bot.register_next_step_handler(call.message, process_trailer_upload, movie_id)
+
+def process_trailer_upload(message, movie_id):
+    if not message.video:
+        bot.send_message(message.chat.id, "❌ لطفاً یک فایل ویدئویی معتبر ارسال کنید.")
+        return
+
+    trailer_file_id = message.video.file_id
+
+    # ذخیره تریلر در دیتابیس
+    cursor.execute(
+        "UPDATE movies SET trailer_file_id = ? WHERE movie_id = ?",
+        (trailer_file_id, movie_id)
+    )
+    conn.commit()
+    bot.send_message(message.chat.id, "✅ تریلر با موفقیت ذخیره شد!")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("next_step|"))
+def next_step(call):
+    """دریافت عکس و اطلاعات فیلم."""
+    movie_id = call.data.split("|")[1]
+    bot.send_message(call.message.chat.id, "لطفاً عکس فیلم را ارسال کنید:")
+    bot.register_next_step_handler(call.message, process_movie_photo, movie_id)
+
+def process_movie_photo(message, movie_id):
+    if not message.photo:
+        bot.send_message(message.chat.id, "❌ لطفاً یک عکس معتبر ارسال کنید.")
+        return
+
+    photo_id = message.photo[-1].file_id
+    bot.send_message(message.chat.id, "✅ عکس با موفقیت دریافت شد.\nلطفاً عنوان فیلم را ارسال کنید:")
+    bot.register_next_step_handler(message, process_movie_title, movie_id, photo_id)
+
+def process_movie_title(message, movie_id, photo_id):
+    title = message.text.strip()
+    bot.send_message(message.chat.id, "لطفاً توضیحات فیلم را ارسال کنید:")
+    bot.register_next_step_handler(message, process_movie_description, movie_id, photo_id, title)
+
+def process_movie_description(message, movie_id, photo_id, title):
+    try:
+        description = message.text.strip()
+        if not description:
+            bot.send_message(message.chat.id, "❌ توضیحات نمی‌تواند خالی باشد.")
+            return
+
+        # چاپ مقادیر برای بررسی
+        print(f"movie_id: {movie_id}, title: {title}, description: {description}, photo_id: {photo_id}")
+
+        # ذخیره اطلاعات در دیتابیس
+        cursor.execute(
+            "INSERT INTO movies (movie_id, title, description, photo_id) VALUES (?, ?, ?, ?)",
+            (movie_id, title, description, photo_id)
+        )
+        conn.commit()
+
+        # ارسال به کانال عمومی
+        send_to_public_channel(movie_id, photo_id, title, description)
+        bot.send_message(message.chat.id, "✅ فیلم جدید با موفقیت ثبت و به کانال عمومی ارسال شد!")
+    except sqlite3.Error as db_error:
+        bot.send_message(message.chat.id, "❌ خطا در ذخیره اطلاعات در پایگاه داده.")
+        print(f"خطا در پایگاه داده: {db_error}")
+    except Exception as e:
+        bot.send_message(message.chat.id, "❌ خطا در ثبت توضیحات فیلم.")
+        print(f"خطای عمومی: {e}")
+        
+def send_to_public_channel(movie_id, photo_id, title, description):
+    """ارسال پست فیلم به کانال عمومی."""
+    markup = types.InlineKeyboardMarkup()
+
+    # دکمه شیشه‌ای دوبله فارسی
+    dub_files = cursor.execute(
+        "SELECT quality FROM movie_qualities WHERE movie_id = ? AND category = 'دوبله فارسی'", (movie_id,)
+    ).fetchall()
+    if dub_files:
+        # لینک بدون _dub
+        markup.add(types.InlineKeyboardButton(
+            "تماشا و دانلود دوبله فارسی", 
+            url=f"https://t.me/{bot.get_me().username}?start={movie_id}"
+        ))
+
+    # دکمه شیشه‌ای زیرنویس فارسی
+    sub_files = cursor.execute(
+        "SELECT quality FROM movie_qualities WHERE movie_id = ? AND category = 'زیرنویس فارسی'", (movie_id,)
+    ).fetchall()
+    if sub_files:
+        # لینک بدون _sub
+        markup.add(types.InlineKeyboardButton(
+            "تماشا و دانلود زیرنویس فارسی", 
+            url=f"https://t.me/{bot.get_me().username}?start={movie_id}"
+        ))
+
+    caption = (
+       f"🎬 **نام فیلم:** {title}\n\n"
+       f"📖 **خلاصه داستان:** {description}\n\n"
+       f"✨ **اینجا رو فشار بده و بیا داخل کانال پر از فیلم و سریال:** [موی جوانMoveJavan](https://t.me/movejavan)\n\n"
+       f"⬇️ **برای دانلود روی دکمه‌های زیر بزنید:**"
+    )
+
+
+    # ارسال پست به کانال عمومی
+    bot.send_photo(PUBLIC_CHANNEL_ID, photo=photo_id, caption=caption, parse_mode="Markdown", reply_markup=markup)
+
+
+# 📋 مدیریت تبلیغات
+@bot.message_handler(func=lambda message: message.text == "📋 مدیریت تبلیغات" and message.from_user.id in ADMIN_ID)
+def manage_ads(message):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("➕ ارسال تبلیغ جدید", callback_data="add_ad"))
+    markup.add(types.InlineKeyboardButton("➖ حذف تبلیغ", callback_data="remove_ad"))
+    bot.send_message(message.chat.id, "📋 مدیریت تبلیغات:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "add_ad")
+def add_ad(call):
+    msg = bot.send_message(call.message.chat.id, "لطفاً تبلیغ خود را ارسال کنید (متن یا فایل):")
+    bot.register_next_step_handler(msg, process_add_ad)
+
+def process_add_ad(message):
+    if message.text:
+        content = message.text
+        file_id = None
+    elif message.photo:
+        content = message.caption or "تبلیغات"
+        file_id = message.photo[-1].file_id
+    elif message.video:
+        content = message.caption or "تبلیغات"
+        file_id = message.video.file_id
+    else:
+        bot.send_message(message.chat.id, "❌ لطفاً متن یا فایل معتبری ارسال کنید.")
+        admin_panel(message)
+        return
+
+    cursor.execute("INSERT INTO ads (content, file_id) VALUES (?, ?)", (content, file_id))
+    conn.commit()
+    bot.send_message(message.chat.id, "✅ تبلیغ با موفقیت ذخیره شد.")
+    admin_panel(message)
+
+@bot.callback_query_handler(func=lambda call: call.data == "remove_ad")
+def remove_ad(call):
+    ads = cursor.execute("SELECT id, content FROM ads").fetchall()
+    if not ads:
+        bot.send_message(call.message.chat.id, "❌ هیچ تبلیغی برای حذف وجود ندارد.")
+        return
+
+    markup = types.InlineKeyboardMarkup()
+    for ad in ads:
+        markup.add(types.InlineKeyboardButton(f"حذف: {ad[1][:20]}...", callback_data=f"delete_ad_{ad[0]}"))
+    bot.send_message(call.message.chat.id, "📋 تبلیغاتی که می‌توانید حذف کنید:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("delete_ad_"))
+def delete_ad(call):
+    ad_id = call.data.split("_")[2]
+    cursor.execute("DELETE FROM ads WHERE id = ?", (ad_id,))
+    conn.commit()
+    bot.send_message(call.message.chat.id, "✅ تبلیغ حذف شد.")
+    admin_panel(call.message)
+
+def fetch_random_ad():
+    ad = cursor.execute("SELECT content, file_id FROM ads ORDER BY RANDOM() LIMIT 1").fetchone()
+    return ad
+    
+    # 📋 مدیریت کانال‌های اجباری
+@bot.message_handler(func=lambda message: message.text == "📋 مدیریت کانال‌های اجباری" and message.from_user.id in ADMIN_ID)
+def manage_channels(message):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("➕ افزودن کانال", callback_data="add_channel"))
+    markup.add(types.InlineKeyboardButton("➖ حذف کانال", callback_data="remove_channel"))
+    bot.send_message(message.chat.id, "📋 مدیریت کانال‌های اجباری:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "add_channel")
+def add_channel(call):
+    msg = bot.send_message(call.message.chat.id, "لطفاً یوزرنیم کانال را وارد کنید (بدون @):")
+    bot.register_next_step_handler(msg, process_add_channel)
+
+def process_add_channel(message):
+    try:
+        username = message.text.strip()
+        cursor.execute("INSERT INTO mandatory_channels (username) VALUES (?)", (username,))
+        conn.commit()
+        bot.send_message(message.chat.id, f"✅ کانال @{username} با موفقیت اضافه شد.")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ خطا در افزودن کانال:\n{e}")
+
+@bot.callback_query_handler(func=lambda call: call.data == "remove_channel")
+def remove_channel(call):
+    channels = cursor.execute("SELECT username FROM mandatory_channels").fetchall()
+    if not channels:
+        bot.send_message(call.message.chat.id, "❌ کانالی برای حذف وجود ندارد.")
+        return
+
+    markup = types.InlineKeyboardMarkup()
+    for channel in channels:
+        markup.add(types.InlineKeyboardButton(f"حذف @{channel[0]}", callback_data=f"delete_{channel[0]}"))
+    bot.send_message(call.message.chat.id, "📋 کانال‌هایی که می‌توانید حذف کنید:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("delete_"))
+def delete_channel(call):
+    username = call.data.split("_")[1]
+    cursor.execute("DELETE FROM mandatory_channels WHERE username = ?", (username,))
+    conn.commit()
+    bot.send_message(call.message.chat.id, f"✅ کانال @{username} با موفقیت حذف شد.")
+    
+# بررسی عضویت کاربر
+@bot.callback_query_handler(func=lambda call: call.data.startswith("check_membership_"))
+def check_membership(call):
+    movie_id = call.data.split("_")[2]
+    mandatory_channels = cursor.execute("SELECT username FROM mandatory_channels").fetchall()
+
+    bot.answer_callback_query(call.id, "⏳ در حال بررسی عضویت...")
+
+    errors = []
+    for channel in mandatory_channels:
+        username = channel[0]
+        try:
+            member = bot.get_chat_member(f"@{username}", call.from_user.id)
+            if member.status not in ['member', 'administrator', 'creator']:
+                errors.append(f"❌ لطفاً در کانال @{username} عضو شوید.")
+        except Exception as e:
+            errors.append(f"❌ خطا در بررسی کانال @{username}: {e}")
+
+    if errors:
+        bot.send_message(call.message.chat.id, "\n".join(errors))
+        return
+
+    bot.send_message(call.message.chat.id, "✅ عضویت شما تأیید شد!")
+    send_movie(call.message, movie_id)
+
+# ارسال فیلم
+def send_movie(message, movie_id):
+    # بازیابی فیلم و تریلر از دیتابیس
+    movie_data = cursor.execute(
+        "SELECT title, trailer_file_id FROM movies WHERE movie_id = ?",
+        (movie_id,)
+    ).fetchone()
+
+    if not movie_data:
+        bot.send_message(message.chat.id, "❌ فیلمی برای ارسال یافت نشد.")
+        return
+
+    title, trailer_file_id = movie_data
+
+    # ارسال تریلر (در صورت وجود)
+    if trailer_file_id:
+        bot.send_video(
+            message.chat.id,
+            trailer_file_id,
+            caption=f"🎥 تریلر فیلم: {title}\n\n✨ بهترین فیلم‌ها را در کانال ما دنبال کنید: [@movejavan](https://t.me/movejavan)",
+            parse_mode="Markdown"
+        )
+    else:
+        bot.send_message(message.chat.id, "❌ تریلری برای این فیلم ثبت نشده است.")
+
+    # ارسال فیلم‌های باکیفیت
+    qualities = cursor.execute(
+        "SELECT quality, category, file_id FROM movie_qualities WHERE movie_id = ?",
+        (movie_id,)
+    ).fetchall()
+
+    if not qualities:
+        bot.send_message(message.chat.id, "❌ هیچ فایل مرتبط با این فیلم یافت نشد.")
+        return
+
+    for quality, category, file_id in qualities:
+        caption = (
+            f"🎬 **{title}**\n"
+            f"🎥 **{category} - کیفیت {quality}**\n\n"
+            f"⏳ **لطفاً فایل را ذخیره کنید. فایل ظرف ۴۰ ثانیه حذف خواهد شد.**\n\n"
+            f"✨ **بهترین فیلم‌ها را در کانال ما دنبال کنید:** [@movejavan](https://t.me/movejavan)"
+        )
+        sent_message = bot.send_video(
+            message.chat.id,
+            file_id,
+            caption=caption,
+            parse_mode="Markdown"
+        )
+
+        # حذف خودکار پیام بعد از ۴۰ ثانیه
+        Timer(40, lambda chat_id=message.chat.id, msg_id=sent_message.message_id: bot.delete_message(chat_id, msg_id)).start()
+
+    # ارسال تبلیغ (در صورت وجود)
+    ad = fetch_random_ad()
+    if ad:
+        ad_content, ad_file_id = ad
+        if ad_file_id:
+            bot.send_photo(message.chat.id, ad_file_id, caption=ad_content)
+        else:
+            bot.send_message(message.chat.id, ad_content)
+
+# ارسال فیلم به کاربر
+def send_movie_to_user(message, movie_id):
+    mandatory_channels = cursor.execute("SELECT username FROM mandatory_channels").fetchall()
+    if not mandatory_channels:
+        send_movie(message, movie_id)
+        return
+
+    # نمایش کانال‌های اجباری
+    markup = types.InlineKeyboardMarkup()
+    for channel in mandatory_channels:
+        username = channel[0]
+        btn = types.InlineKeyboardButton(f"عضویت در کانال @{username}", url=f"https://t.me/{username}")
+        markup.add(btn)
+    markup.add(types.InlineKeyboardButton("✅ عضو شدم", callback_data=f"check_membership_{movie_id}"))
+
+    bot.send_message(
+        message.chat.id,
+        "❌ لطفاً ابتدا در کانال‌های زیر عضو شوید و سپس روی 'عضو شدم' کلیک کنید:",
+        reply_markup=markup
+    )
+
+# بررسی عضویت کاربر
+@bot.callback_query_handler(func=lambda call: call.data.startswith("check_membership_"))
+def check_membership(call):
+    movie_id = call.data.split("_")[2]
+    mandatory_channels = cursor.execute("SELECT username FROM mandatory_channels").fetchall()
+
+    bot.answer_callback_query(call.id, "⏳ در حال بررسی عضویت...")
+
+    errors = []
+    for channel in mandatory_channels:
+        username = channel[0]
+        try:
+            member = bot.get_chat_member(f"@{username}", call.from_user.id)
+            if member.status not in ['member', 'administrator', 'creator']:
+                errors.append(f"❌ لطفاً در کانال @{username} عضو شوید.")
+        except Exception as e:
+            errors.append(f"❌ خطا در بررسی کانال @{username}: {e}")
+
+    if errors:
+        bot.send_message(call.message.chat.id, "\n".join(errors))
+        return
+
+    bot.send_message(call.message.chat.id, "✅ عضویت شما تأیید شد!")
+    send_movie(call.message, movie_id)
+
+# ارسال فیلم
+
+def send_movie(message, movie_id, category=None):
+    if category:
+        # بازیابی فایل‌های مرتبط با دسته‌بندی خاص (دوبله یا زیرنویس)
+        qualities = cursor.execute(
+            "SELECT quality, file_id, (SELECT title FROM movies WHERE movie_id = ? LIMIT 1) as title FROM movie_qualities WHERE movie_id = ? AND category = ?",
+            (movie_id, movie_id, category.strip())
+        ).fetchall()
+
+        if qualities:
+            for quality, file_id, title in qualities:
+                caption = (
+                    f"🎬 **{title}**\n"
+                    f"🎥 **{category} - کیفیت {quality}**\n\n"
+                    f"⏳ **لطفاً فایل را ذخیره کنید. فایل ظرف ۴۰ ثانیه حذف خواهد شد.**\n\n"
+                    f"✨ **بهترین فیلم‌ها را برای شما آماده کرده‌ایم!**\n"
+                    f"📢 **به کانال ما بپیوندید:** [@movejavan](https://t.me/movejavan)"
+                )
+                sent_message = bot.send_video(
+                    message.chat.id,
+                    file_id,
+                    caption=caption,
+                    parse_mode="Markdown"
+                )
+
+                # حذف خودکار پیام پس از ۴۰ ثانیه
+                Timer(40, lambda chat_id=message.chat.id, msg_id=sent_message.message_id: bot.delete_message(chat_id, msg_id)).start()
+        else:
+            bot.send_message(
+                message.chat.id,
+                f"❌ هیچ فایل مرتبط با **{category}** برای شناسه {movie_id} یافت نشد."
+            )
+    else:
+        # بازیابی تمام فایل‌ها برای فیلم
+        qualities = cursor.execute(
+            "SELECT category, quality, file_id, (SELECT title FROM movies WHERE movie_id = ? LIMIT 1) as title FROM movie_qualities WHERE movie_id = ?",
+            (movie_id, movie_id)
+        ).fetchall()
+
+        if qualities:
+            for category, quality, file_id, title in qualities:
+                caption = (
+                    f"🎬 **{title}**\n"
+                    f"🎥 **{category} - کیفیت {quality}**\n\n"
+                    f"⏳ **لطفاً فایل را ذخیره کنید. فایل ظرف ۴۰ ثانیه حذف خواهد شد.**\n\n"
+                    f"✨ **بهترین فیلم‌ها را برای شما آماده کرده‌ایم!**\n"
+                    f"📢 **به کانال ما بپیوندید:** [@movejavan](https://t.me/movejavan)"
+                )
+                sent_message = bot.send_video(
+                    message.chat.id,
+                    file_id,
+                    caption=caption,
+                    parse_mode="Markdown"
+                )
+
+                # حذف خودکار پیام
+                Timer(40, lambda chat_id=message.chat.id, msg_id=sent_message.message_id: bot.delete_message(chat_id, msg_id)).start()
+        else:
+            bot.send_message(
+                message.chat.id,
+                "❌ هیچ فایل مرتبط یافت نشد."
+            )
+
+    # ارسال تبلیغ در صورت وجود
+    ad = fetch_random_ad()
+    if ad:
+        ad_content, ad_file_id = ad
+        if ad_file_id:
+            bot.send_photo(message.chat.id, ad_file_id, caption=ad_content)
+        else:
+            bot.send_message(message.chat.id, ad_content)
+    # اجرای ربات
+bot.infinity_polling()
